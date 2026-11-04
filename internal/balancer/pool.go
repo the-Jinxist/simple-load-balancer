@@ -41,7 +41,7 @@ func (s *ServerPool) NextIndex() int {
 		return 0
 	}
 
-	return int(s.current.Add(1) % uint64(len(s.servers)))
+	return int((s.current.Add(1) - 1) % uint64(len(s.servers)))
 }
 
 // NextPeer returns the next alive backend in round-robin order, starting at

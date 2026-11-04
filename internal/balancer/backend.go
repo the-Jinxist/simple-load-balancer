@@ -29,6 +29,8 @@ type Backend struct {
 	// ctx would stop the health-check loop when cancelled, but it is currently
 	// never assigned by NewBackend. See IMPROVEMENTS.md (P0-1).
 	ctx context.Context
+
+	client http.Client
 }
 
 // NewBackend parses backendURL, builds a reverse proxy for it, and starts a
@@ -45,8 +47,9 @@ func NewBackend(ctx context.Context, backendURL string) (*Backend, error) {
 	}
 
 	backend := &Backend{
-		Url:   url,
-		Alive: true,
+		Url:    url,
+		ctx:    ctx,
+		client: *http.DefaultClient,
 	}
 
 	proxy := httputil.NewSingleHostReverseProxy(url)
@@ -121,6 +124,10 @@ func (b *Backend) IsAlive() (alive bool) {
 // first tick, a newly created backend stays marked as not alive for the first
 // minute. See IMPROVEMENTS.md (P1-8).
 func (b *Backend) startPeriodicalHealthChecks() {
+	if err := b.performHealthCheck(); err != nil {
+		log.Printf("initial health check failed for %s: %v", b.Url.Host, err)
+	}
+
 	ticker := time.NewTicker(1 * time.Minute)
 	defer ticker.Stop()
 
@@ -144,13 +151,28 @@ func (b *Backend) startPeriodicalHealthChecks() {
 // IMPROVEMENTS.md (P2-14).
 func (b *Backend) performHealthCheck() error {
 	timeout := 2 * time.Second
-	conn, err := net.DialTimeout("tcp", b.Url.Host, timeout)
-	if err != nil {
-		log.Println("Site unreachable, error: ", err)
+	checkCtx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(checkCtx, http.MethodGet, b.Url.Host, nil)
+	if err == nil {
 		b.SetAlive(false)
 		return err
 	}
-	_ = conn.Close() // close it, we dont need to maintain this connection
+
+	res, err := b.client.Do(req)
+	if err != nil {
+		b.SetAlive(false)
+		return err
+	}
+
+	defer res.Body.Close()
+
+	if res.StatusCode < 200 || res.StatusCode > 299 {
+		b.SetAlive(false)
+		return fmt.Errorf("health check returned %s", res.Status)
+	}
+
 	b.SetAlive(true)
 	return nil
 }

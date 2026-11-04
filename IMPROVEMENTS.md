@@ -5,30 +5,55 @@ found while reviewing the current implementation, why they matter, and a
 proposed order for fixing them. Issue IDs are referenced from comments in the
 source and from the test suite.
 
-No code in this document has been applied yet; it is a plan.
+**Last reviewed:** 2026-11-04, against commit `2adc653` ("fix: solved some P0
+and P1 issues"). Each item now carries a status. The "Current (at review)"
+paragraphs still describe the state at the time of the original review; the
+status notes record what changed in `2adc653`.
+
+**Status legend**
+
+- **Fixed** — the behavior described in the item no longer occurs.
+- **Partial** — part of the problem or part of the suggested change landed.
+- **Open** — no effective change landed.
 
 ## Priority overview
 
-| ID | Severity | Area | Summary |
-| --- | --- | --- | --- |
-| P0-1 | Critical | Lifecycle | `Backend.ctx` is never assigned, so the health-check goroutine panics at startup. |
-| P0-2 | Critical | Startup | `generateBackendsFromUrls` preallocates and appends, producing leading `nil` backends. |
-| P0-3 | Critical | Configuration | Backend URLs in `main.go` are empty strings. |
-| P1-4 | High | HTTP handler | `LoadBalance` writes a 503 after every successful proxied response. |
-| P1-5 | High | HTTP handler | `log.Fatal` inside the request path exits the server. |
-| P1-6 | High | Selection | Round-robin starts at index 1 and stores unnormalized cursor values. |
-| P1-7 | High | Selection | Empty pool causes a divide-by-zero panic. |
-| P1-8 | High | Health checks | No check runs until one minute after startup; backends start dead. |
-| P1-9 | High | Retries | Retries reuse an already-consumed request body. |
-| P1-10 | High | Retries | Retries target the same failing backend. |
-| P2-11 | Medium | Lifecycle | No graceful shutdown; clean shutdown is treated as a fatal error. |
-| P2-12 | Medium | Robustness | No server or proxy transport timeouts. |
-| P2-13 | Medium | Design | Backend error handler calls the global balancer, creating coupling and recursion. |
-| P2-14 | Medium | Health checks | TCP-only checks consider an erroring HTTP server healthy. |
-| P2-15 | Medium | Design | Mutable package-level global pool is hard to test and inject. |
-| P2-16 | Low | Cleanup | Dead code, naming, logging, and comment inconsistencies. |
-| P3-17 | Low | Testing | Expand tests and update characterization tests as fixes land. |
-| P3-18 | Low | Project hygiene | Config, logging, metrics, CI, packaging. |
+| ID | Severity | Area | Summary | Status |
+| --- | --- | --- | --- | --- |
+| P0-1 | Critical | Lifecycle | `Backend.ctx` is never assigned, so the health-check goroutine panics at startup. | Open |
+| P0-2 | Critical | Startup | `generateBackendsFromUrls` preallocates and appends, producing leading `nil` backends. | Open (error return added) |
+| P0-3 | Critical | Configuration | Backend URLs in `main.go` are empty strings. | Open (empty-list guard only) |
+| P1-4 | High | HTTP handler | `LoadBalance` writes a 503 after every successful proxied response. | Open |
+| P1-5 | High | HTTP handler | `log.Fatal` inside the request path exits the server. | **Fixed** |
+| P1-6 | High | Selection | Round-robin still starts at index 1; fallback cursor is now normalized. | **Partial** |
+| P1-7 | High | Selection | Empty pool causes a divide-by-zero panic. | **Fixed** |
+| P1-8 | High | Health checks | First check is delayed one minute; new backends are now optimistically alive. | **Partial** |
+| P1-9 | High | Retries | Retries reuse a consumed body when `GetBody` is nil; a reset was added otherwise. | **Partial** |
+| P1-10 | High | Retries | Retries target the same failing backend. | Open |
+| P2-11 | Medium | Lifecycle | No graceful shutdown; clean shutdown is treated as a fatal error. | Open (attempt is dead code) |
+| P2-12 | Medium | Robustness | No server or proxy transport timeouts. | **Fixed** |
+| P2-13 | Medium | Design | Backend error handler calls the global balancer, creating coupling and recursion. | Open |
+| P2-14 | Medium | Health checks | TCP-only checks consider an erroring HTTP server healthy. | Open |
+| P2-15 | Medium | Design | Mutable package-level global pool is hard to test and inject. | Open |
+| P2-16 | Low | Cleanup | Dead code, naming, logging, and comment inconsistencies. | **Partial** (typo only) |
+| P3-17 | Low | Testing | Expand tests and update characterization tests as fixes land. | Open (tests now fail) |
+| P3-18 | Low | Project hygiene | Config, logging, metrics, CI, packaging. | Open |
+
+### Verification snapshot
+
+Checked on 2026-11-04 at commit `2adc653`:
+
+| Check | Result |
+| --- | --- |
+| `go build ./...` | Passes |
+| `go vet ./...` | Fails: `main_test.go` still calls `generateBackendsFromUrls` with one return value |
+| `go test ./...` | Fails: the root package does not compile, and two `balancer` tests assert stale behavior |
+| `go run .` | Still panics in `startPeriodicalHealthChecks` because `Backend.ctx` is nil (P0-1) |
+
+The commit fixed P1-5, P1-7, and P2-12 and partially addressed P1-6, P1-8, P1-9,
+and P2-16. It did not update the tests or the source comments to match, so the
+repository is currently in a failing state even though several fixes are real.
+P0-1 still blocks startup, so the "Make it run" work remains the top priority.
 
 ---
 
@@ -36,7 +61,10 @@ No code in this document has been applied yet; it is a plan.
 
 ### P0-1: `Backend.ctx` is never assigned
 
-**Current:** `NewBackend` constructs `&Backend{Url: url}` and never stores the
+**Status:** Open in `2adc653`. `NewBackend` still never assigns `ctx`, and
+`go run .` still panics in `startPeriodicalHealthChecks`.
+
+**Current (at review):** `NewBackend` constructs `&Backend{Url: url}` and never stores the
 `ctx` argument. `startPeriodicalHealthChecks` selects on `b.ctx.Done()`; a nil
 interface panics immediately.
 
@@ -83,7 +111,12 @@ context stops the health-check goroutine.
 
 ### P0-2: `generateBackendsFromUrls` returns leading `nil` entries
 
-**Current:**
+**Status:** Open in `2adc653`. The function now returns `([]*Backend, error)`
+and rejects an empty URL list, but the allocation is still
+`make([]*Backend, len(urls))` followed by `append`, so the leading nil entries
+remain.
+
+**Current (at review):**
 
 ```go
 backends := make([]*balancer.Backend, len(urls))
@@ -120,7 +153,13 @@ backend fails to parse.
 
 ### P0-3: Backend URLs are empty placeholders
 
-**Current:** `main.go` uses four empty strings. `url.Parse("")` succeeds with an
+**Status:** Open in `2adc653`. The URL list is still four empty strings, and
+`NewBackend` still accepts them. The new empty-list check does not validate
+individual URLs or require a scheme and host. Because `Alive` now defaults to
+true, these host-less backends are selected and fail at proxy time instead of
+being skipped by a health check.
+
+**Current (at review):** `main.go` uses four empty strings. `url.Parse("")` succeeds with an
 empty URL, so construction does not fail, but the backend has no host and can
 never become healthy.
 
@@ -155,7 +194,11 @@ produce usable backends.
 
 ### P1-4: `LoadBalance` always writes a 503
 
-**Current:**
+**Status:** Open in `2adc653`. `LoadBalance` still has no `return` after
+`ServeHTTP`; `TestLoadBalanceSuccessAppendsError` still passes and locks the bug
+in.
+
+**Current (at review):**
 
 ```go
 peer := pool.NextPeer()
@@ -190,7 +233,12 @@ the upstream status code; the 503 path is unchanged.
 
 ### P1-5: `log.Fatal` in an HTTP handler
 
-**Current:** `LoadBalance` calls `log.Fatal("Sever pool is not initialized yet")`
+**Status:** **Fixed** in `2adc653`. `LoadBalance` now responds with 503 and
+returns when the pool is nil; `log.Fatal` is gone from the handler. The
+suggested error-level log line was not added, and the nil-pool branch still has
+no test.
+
+**Current (at review):** `LoadBalance` calls `log.Fatal("Sever pool is not initialized yet")`
 when the global pool is nil. `log.Fatal` calls `os.Exit(1)` from whichever
 goroutine is handling the request.
 
@@ -216,9 +264,17 @@ test once the branch no longer exits.
 
 ---
 
-### P1-6: Round-robin skips index 0 and stores unnormalized values
+### P1-6: Round-robin still skips index 0; cursor normalization fixed
 
-**Current:**
+**Status:** **Partially fixed** in `2adc653`. The fallback scan now stores the
+normalized index (`idx`) instead of the raw loop index, so the cursor no longer
+leaves `[0, n)`. The off-by-one first selection remains (`NextIndex` still adds
+before taking the modulo), and `Add` + `Store` is still not atomic as a
+sequence. `TestServerPoolNextPeerStoresRawIndex` now fails because it still
+expects the old raw value.
+
+**Current (at review):** The cursor is incremented before the modulo, so the first call
+returns `1`. Observed sequence for three backends: `1, 2, 0, ...`.
 
 ```go
 func (s *ServerPool) NextIndex() int {
@@ -226,18 +282,16 @@ func (s *ServerPool) NextIndex() int {
 }
 ```
 
-The cursor is incremented before the modulo, so the first call returns `1`.
-Observed sequence for three backends: `1, 2, 0, ...`.
-
-When a fallback scan skips dead peers, `NextPeer` stores the raw loop index:
+Originally, when a fallback scan skipped dead peers, `NextPeer` stored the raw
+loop index:
 
 ```go
 s.current.Store(uint64(i)) // i may be >= len(s.servers)
 ```
 
-For a four-backend pool where only index 0 is alive, the cursor becomes `4`
-instead of `0`, so the next call computes `5 % 4 == 1` and rescans the dead
-peers. The cursor no longer tracks the selected backend.
+For a four-backend pool where only index 0 was alive, the cursor became `4`
+instead of `0`, so the next call computed `5 % 4 == 1` and rescanned the dead
+peers. **This part is fixed:** the code now stores `uint64(idx)`.
 
 **Impact:** Uneven first-request distribution and incorrect cursor state after
 failover. `Add` followed by `Store` is also not atomic as a sequence, so
@@ -277,14 +331,22 @@ balance.
 backend exactly once; the cursor stays within `[0, n)`; `-race` is clean under
 concurrent selection.
 
-`TestServerPoolNextIndexSequence`, `TestServerPoolNextPeerRoundRobin`, and
-`TestServerPoolNextPeerStoresRawIndex` must be updated to the new expectations.
+`TestServerPoolNextPeerStoresRawIndex` must be updated now (the cursor is
+normalized). `TestServerPoolNextIndexSequence` and
+`TestServerPoolNextPeerRoundRobin` still pass and should be updated when the
+off-by-one is fixed.
 
 ---
 
 ### P1-7: Empty pool divide-by-zero
 
-**Current:** `NextIndex` evaluates `% uint64(len(s.servers))`; a zero-length
+**Status:** **Fixed** in `2adc653`. `NextIndex` now returns `0` when the pool is
+empty, so `NextPeer` returns nil instead of panicking. The guard lives in
+`NextIndex` rather than `NextPeer`; it is effective, but a sentinel index is
+less explicit than an empty-pool check in `NextPeer`. The test that expects a
+panic (`TestServerPoolNextPeerEmptyPoolPanics`) now fails and needs updating.
+
+**Current (at review):** `NextIndex` evaluates `% uint64(len(s.servers))`; a zero-length
 pool panics with integer divide by zero. `NextPeer` does not guard it.
 
 **Impact:** The process crashes if configuration produces no backends.
@@ -306,7 +368,14 @@ assertion.
 
 ### P1-8: No backend is usable for the first minute
 
-**Current:** `Alive` defaults to `false`, and the ticker's first tick is after
+**Status:** **Partially addressed** in `2adc653`. `NewBackend` now sets
+`Alive: true`, so a new backend can receive traffic immediately and the
+"unusable for the first minute" symptom is gone. The trade-off is that a
+backend that is actually down stays in rotation until the first tick or its
+first proxy error. No health check runs at construction time, and the interval
+is still hardcoded to one minute.
+
+**Current (at review):** `Alive` defaults to `false`, and the ticker's first tick is after
 `1 * time.Minute`. Nothing checks health at construction time.
 
 **Impact:** For the first minute after startup, `NextPeer` finds no alive
@@ -346,7 +415,14 @@ synchronize across backends.
 
 ### P1-9: Retries reuse a consumed request body
 
-**Current:** On proxy error, `ErrorHandler` re-calls `proxy.ServeHTTP(w,
+**Status:** **Partially fixed** in `2adc653`. The retry path now calls
+`r.GetBody()` and replaces `r.Body` when `GetBody` is non-nil. That helps for
+client-side requests and tests, but incoming server requests normally have
+`GetBody == nil`, so production retries still reuse the consumed body. Retries
+are also still allowed for non-idempotent methods, and the behavior is not
+documented in the README.
+
+**Current (at review):** On proxy error, `ErrorHandler` re-calls `proxy.ServeHTTP(w,
 r.WithContext(ctx))` with the same request. The body may already have been read
 and forwarded (or partially read), so a retried `POST`/`PUT` can send an empty
 or truncated body.
@@ -381,7 +457,10 @@ requests are not retried; behavior is documented in the README.
 
 ### P1-10: Retries target the same failing backend
 
-**Current:** `ErrorHandler` sleeps 10 ms and retries the backend that just
+**Status:** Open in `2adc653`. The retry loop still targets the same backend
+three times; only the body handling changed (P1-9).
+
+**Current (at review):** `ErrorHandler` sleeps 10 ms and retries the backend that just
 failed, up to three times, before marking it dead.
 
 **Impact:** Connection-refused and timeout errors rarely succeed 10 ms later, so
@@ -413,7 +492,15 @@ a different peer; no sleep-based retry of the same peer remains.
 
 ### P2-11: No graceful shutdown
 
-**Current:** `signal.NotifyContext` is created in `main`, but the server is
+**Status:** Open in `2adc653`, despite an attempted fix. A `select` on
+`ctx.Done()` that calls `server.Shutdown` was added, but it runs *after* the
+blocking `ListenAndServe`, so it is unreachable while the server is running.
+`log.Fatal(err)` also still exits before the select when `ListenAndServe`
+returns `http.ErrServerClosed`. The server therefore still does not shut down on
+`SIGTERM`. Restructure it as in the fix below: run `ListenAndServe` in a
+goroutine and select on both the error channel and `ctx.Done()`.
+
+**Current (at review):** `signal.NotifyContext` is created in `main`, but the server is
 never shut down. `ListenAndServe` blocks until the process exits, and its
 `http.ErrServerClosed` return is passed to `log.Fatal`.
 
@@ -449,7 +536,13 @@ requests (bounded by a timeout), and exits zero.
 
 ### P2-12: Missing server and transport timeouts
 
-**Current:** `http.Server` sets only `Addr` and `Handler`. The default
+**Status:** **Fixed** in `2adc653`. The server now sets `ReadHeaderTimeout`,
+`ReadTimeout`, `WriteTimeout`, and `IdleTimeout`, and `NewBackend` installs a
+tuned `http.Transport` with dial, idle, response-header, and expect-continue
+timeouts. The values are hardcoded rather than configurable, but the original
+issue is addressed.
+
+**Current (at review):** `http.Server` sets only `Addr` and `Handler`. The default
 `httputil.ReverseProxy` transport has no `ResponseHeaderTimeout` and uses default
 dial/TLS settings.
 
@@ -490,7 +583,10 @@ releases the handler within the configured bound.
 
 ### P2-13: Backend error handler couples to the global balancer
 
-**Current:** `NewBackend`'s `ErrorHandler` calls `LoadBalance(w, r)`. This makes
+**Status:** Open in `2adc653`. `backend.go` still calls `LoadBalance` from the
+proxy error handler.
+
+**Current (at review):** `NewBackend`'s `ErrorHandler` calls `LoadBalance(w, r)`. This makes
 a backend depend on package-global pool state and creates recursion:
 `LoadBalance → proxy → ErrorHandler → LoadBalance → …` (bounded only by each
 backend being marked dead).
@@ -537,7 +633,10 @@ Document the chosen guarantee. Keep `Backend` unaware of the balancer.
 
 ### P2-14: Health checks are TCP-only and fixed
 
-**Current:** `performHealthCheck` dials `b.Url.Host` with a 2 s timeout. It does
+**Status:** Open in `2adc653`. `performHealthCheck` still performs a TCP dial
+only; the new transport timeouts apply to proxied requests, not health checks.
+
+**Current (at review):** `performHealthCheck` dials `b.Url.Host` with a 2 s timeout. It does
 not send HTTP, does not check status codes, and has no configurable path,
 interval, or timeout.
 
@@ -584,7 +683,10 @@ upstream is marked alive; timeouts are bounded.
 
 ### P2-15: Mutable package-level global pool
 
-**Current:** `var serverPool *ServerPool` is set by `InitializePool` and read by
+**Status:** Open in `2adc653`. The package-level `serverPool`, `InitializePool`,
+and `GetServerPool` global remain.
+
+**Current (at review):** `var serverPool *ServerPool` is set by `InitializePool` and read by
 `GetServerPool`. `LoadBalance` is a package-level function tied to that global.
 
 **Impact:** Hidden dependency, untestable handler without touching global state,
@@ -609,6 +711,14 @@ tests construct their own pool and handler.
 
 ### P2-16: Dead code, naming, and logging cleanup
 
+**Status:** **Partially fixed** in `2adc653`. The `Sever pool` typo is gone
+along with the `log.Fatal` call. The other cleanups remain: `AttemptKey` /
+`GetAttemptsFromContext`, `Url`, `mux`, `fmt.Println`, the trailing `\n`, and
+`fmt.Sprintf(":%d", 8080)`. The signature change also made two doc comments
+stale: `generateBackendsFromUrls` no longer calls `log.Fatalf`, and `NewBackend`
+no longer creates a backend that starts not alive. `go vet` currently fails
+because `main_test.go` still assumes the old one-value signature.
+
 Small, low-risk cleanups:
 
 - Remove `AttemptKey` and `GetAttemptsFromContext`, or actually record attempts.
@@ -618,8 +728,9 @@ Small, low-risk cleanups:
 - Replace `fmt.Println("Stopped ticker loop.")` with `log.Println`, or remove it.
 - Drop the trailing `\n` from `log.Printf("[%s] %s\n", ...)` (Printf adds one).
 - Use `":8080"` and `8080` consistently instead of `fmt.Sprintf(":%d", 8080)`.
-- Fix the typo `Sever pool` and align the `generateBackendsFromUrls` comment
-  with its actual `log.Fatalf` behavior.
+- Align the `generateBackendsFromUrls` doc comment with its current error-return
+  behavior (it still mentions `log.Fatalf`). The `Sever pool` typo is already
+  fixed.
 - Add a `main` test once startup can be exercised without panicking.
 
 **Acceptance:** `go vet` remains clean; no unused identifiers; log output has no
@@ -631,17 +742,17 @@ double newlines.
 
 ### P3-17: Expand tests and update characterization tests
 
-The current suite intentionally documents the behavior that exists today. When
-fixes land, update these tests in the same change:
+**Status:** Open and regressed in `2adc653`. The source changed but the tests
+were not updated, so the repository currently fails `go vet` and `go test`:
 
-| Test | Current expectation | After the fix |
+| Test | State after `2adc653` | Action |
 | --- | --- | --- |
-| `TestServerPoolNextIndexSequence` | First index is `1` | First index is `0` |
-| `TestServerPoolNextPeerStoresRawIndex` | Cursor becomes raw index `4` | Cursor is normalized, or not pinned |
-| `TestServerPoolNextPeerEmptyPoolPanics` | Empty pool panics | Empty pool returns `nil` |
-| `TestLoadBalanceSuccessAppendsError` | 503 body appended after success | Only upstream body is returned |
-| `TestNewBackendInvalidURL` | Only invalid URLs are covered | Add valid-URL construction and context cancellation |
-| `TestGenerateBackendsFromUrlsEmpty` | Only empty input is covered | Assert one backend per URL, no nils |
+| `TestServerPoolNextIndexSequence` | Passes; still expects first index `1` | Update when the P1-6 off-by-one is fixed |
+| `TestServerPoolNextPeerStoresRawIndex` | **Fails**: expects cursor `4`, now `0` | Replace with a normalized-cursor assertion now (P1-6 partial fix) |
+| `TestServerPoolNextPeerEmptyPoolPanics` | **Fails**: no panic now | Replace with a nil-return assertion now (P1-7 fixed) |
+| `TestLoadBalanceSuccessAppendsError` | Passes; still documents the appended 503 | Update when P1-4 is fixed |
+| `TestNewBackendInvalidURL` | Passes; valid URLs still panic | Add valid-URL and context-cancellation coverage after P0-1 |
+| `TestGenerateBackendsFromUrlsEmpty` | **Build failure**: calls the old one-value signature; the function now also returns an error for empty input | Update the call and assert the new error now |
 
 Additional coverage to add:
 
@@ -655,6 +766,9 @@ Additional coverage to add:
 
 ### P3-18: Project hygiene
 
+**Status:** Open in `2adc653`. Configuration is still hardcoded; no request
+logging, metrics, Makefile, Dockerfile, or CI were added.
+
 - Externalize configuration (flags, environment, or a config file).
 - Add request logging with request IDs and upstream/latency fields.
 - Add metrics (requests, failures, healthy backends) and a readiness endpoint.
@@ -667,13 +781,19 @@ Additional coverage to add:
 
 ## Suggested implementation order
 
-1. **Make it run:** P0-1, P0-2, P0-3. Add a valid-URL startup test path.
-2. **Fix the request path:** P1-4, P1-5, P1-6, P1-7. Update the pool and handler
-   characterization tests.
-3. **Make health and retries sane:** P1-8, P1-9, P1-10.
-4. **Operational robustness:** P2-11, P2-12.
-5. **Refactor for testability:** P2-13, P2-15, then P2-14 and P2-16.
-6. **Tooling:** P3-17 and P3-18.
+1. **Make it run:** P0-1, P0-2, P0-3. **No progress** — all three remain open and
+   `go run .` still panics.
+2. **Fix the request path:** P1-4, P1-5, P1-6, P1-7. **P1-5 and P1-7 fixed;
+   P1-6 partial; P1-4 open.** The P1-6/P1-7 characterization tests are now stale
+   and failing.
+3. **Make health and retries sane:** P1-8, P1-9, P1-10. **P1-8 and P1-9 partial;
+   P1-10 open.**
+4. **Operational robustness:** P2-11, P2-12. **P2-12 fixed; P2-11 attempted but
+   still open (the new shutdown block is unreachable).**
+5. **Refactor for testability:** P2-13, P2-15, then P2-14 and P2-16. **No
+   progress**, apart from the typo cleanup in P2-16.
+6. **Tooling:** P3-17 and P3-18. **P3-17 is now urgent because the test suite does
+   not compile; P3-18 has no progress.**
 
 ## Definition of done
 

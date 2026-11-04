@@ -33,6 +33,7 @@ func LoadBalance(w http.ResponseWriter, r *http.Request) {
 	peer := pool.NextPeer()
 	if peer != nil {
 		peer.ReverseProxy.ServeHTTP(w, r)
+		return
 	}
 
 	// NOTE: this line also runs after a successful ServeHTTP above.

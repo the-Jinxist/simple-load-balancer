@@ -51,11 +51,16 @@ func main() {
 	// treating every error as fatal also exits non-zero in that case. The server
 	// also has no read/write/idle timeouts yet. See IMPROVEMENTS.md (P2-11,
 	// P2-12).
-	if err := server.ListenAndServe(); err != nil {
-		log.Fatal(err)
-	}
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- server.ListenAndServe()
+	}()
 
 	select {
+	case err := <-errCh:
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Fatal(err)
+		}
 	case <-ctx.Done():
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
@@ -77,14 +82,14 @@ func generateBackendsFromUrls(ctx context.Context, urls []string) ([]*balancer.B
 		return nil, errors.New("please add at least one url")
 	}
 
-	backends := make([]*balancer.Backend, len(urls))
-	for _, url := range urls {
+	backends := make([]*balancer.Backend, 0, len(urls))
+	for idx, url := range urls {
 		b, err := balancer.NewBackend(ctx, url)
 		if err != nil {
 			return nil, err
 		}
 
-		backends = append(backends, b)
+		backends[idx] = b
 	}
 
 	return backends, nil
