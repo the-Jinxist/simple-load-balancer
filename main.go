@@ -71,25 +71,21 @@ func main() {
 }
 
 // generateBackendsFromUrls creates one Backend per URL and starts each
-// backend's health checker. It exits the process (via log.Fatalf) if a backend
-// cannot be created.
-//
-// NOTE: the slice is preallocated with len(urls) entries and then appended to,
-// so the result contains len(urls) leading nil entries followed by the real
-// backends. See IMPROVEMENTS.md (P0-2).
+// backend's health checker. It returns an error if the URL list is empty or a
+// backend cannot be created.
 func generateBackendsFromUrls(ctx context.Context, urls []string) ([]*balancer.Backend, error) {
 	if len(urls) == 0 {
 		return nil, errors.New("please add at least one url")
 	}
 
 	backends := make([]*balancer.Backend, 0, len(urls))
-	for idx, url := range urls {
+	for _, url := range urls {
 		b, err := balancer.NewBackend(ctx, url)
 		if err != nil {
 			return nil, err
 		}
 
-		backends[idx] = b
+		backends = append(backends, b)
 	}
 
 	return backends, nil

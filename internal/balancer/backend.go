@@ -30,7 +30,7 @@ type Backend struct {
 	// never assigned by NewBackend. See IMPROVEMENTS.md (P0-1).
 	ctx context.Context
 
-	client http.Client
+	client *http.Client
 }
 
 // NewBackend parses backendURL, builds a reverse proxy for it, and starts a
@@ -49,7 +49,7 @@ func NewBackend(ctx context.Context, backendURL string) (*Backend, error) {
 	backend := &Backend{
 		Url:    url,
 		ctx:    ctx,
-		client: *http.DefaultClient,
+		client: http.DefaultClient,
 	}
 
 	proxy := httputil.NewSingleHostReverseProxy(url)
@@ -154,7 +154,7 @@ func (b *Backend) performHealthCheck() error {
 	checkCtx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(checkCtx, http.MethodGet, b.Url.Host, nil)
+	req, err := http.NewRequestWithContext(checkCtx, http.MethodGet, b.Url.String(), nil)
 	if err == nil {
 		b.SetAlive(false)
 		return err

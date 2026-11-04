@@ -54,11 +54,30 @@ func TestLoadBalanceNoAliveBackends(t *testing.T) {
 	}
 }
 
-// TestLoadBalanceSuccessAppendsError documents a known issue: LoadBalance does
-// not return after the reverse proxy finishes, so it also appends the 503 body
-// (and attempts a second WriteHeader) after a successful response. When
-// IMPROVEMENTS.md P1-4 is fixed the body should contain only the upstream text.
-func TestLoadBalanceSuccessAppendsError(t *testing.T) {
+// TestLoadBalanceNilPool verifies the 503 response added in 2adc653 for the
+// uninitialized-pool branch.
+func TestLoadBalanceNilPool(t *testing.T) {
+	previous := serverPool
+	serverPool = nil
+	t.Cleanup(func() { serverPool = previous })
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+
+	LoadBalance(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusServiceUnavailable)
+	}
+	if body := rec.Body.String(); !strings.Contains(body, "Service not available") {
+		t.Fatalf("body = %q, want it to contain %q", body, "Service not available")
+	}
+}
+
+// TestLoadBalanceSuccess verifies that a successful proxy response is returned
+// as-is. LoadBalance now returns after ServeHTTP, so the 503 body is no longer
+// appended to successful responses.
+func TestLoadBalanceSuccess(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("upstream-ok"))
@@ -90,11 +109,7 @@ func TestLoadBalanceSuccessAppendsError(t *testing.T) {
 	if !strings.Contains(body, "upstream-ok") {
 		t.Fatalf("body = %q, want it to contain the upstream response", body)
 	}
-	if !strings.Contains(body, "Service not available") {
-		t.Fatalf("body = %q, want the erroneously appended 503 body", body)
+	if strings.Contains(body, "Service not available") {
+		t.Fatalf("body = %q, want only the upstream response", body)
 	}
 }
-
-// NOTE: LoadBalance with an uninitialized pool calls log.Fatal, which exits the
-// test process, so that branch is intentionally not tested. See
-// IMPROVEMENTS.md P1-5.
