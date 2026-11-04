@@ -37,6 +37,10 @@ func GetServerPool() *ServerPool {
 // rather than 0. NextIndex panics when the pool is empty. See IMPROVEMENTS.md
 // (P1-6, P1-7).
 func (s *ServerPool) NextIndex() int {
+	if len(s.servers) == 0 {
+		return 0
+	}
+
 	return int(s.current.Add(1) % uint64(len(s.servers)))
 }
 
@@ -63,7 +67,7 @@ func (s *ServerPool) NextPeer() *Backend {
 		idx := i % len(s.servers)
 		if s.servers[idx].IsAlive() {
 			if i != nextIndex {
-				s.current.Store(uint64(i)) // mark the current one (raw, unnormalized index)
+				s.current.Store(uint64(idx)) // mark the current one (raw, unnormalized index)
 			}
 			return s.servers[idx]
 		}

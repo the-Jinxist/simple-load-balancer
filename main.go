@@ -2,12 +2,14 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"simple-load-balancer/internal/balancer"
 )
@@ -30,12 +32,19 @@ func main() {
 
 	// NOTE: the signal context is only passed to the backends. The HTTP server
 	// itself does not shut down gracefully yet. See IMPROVEMENTS.md (P2-11).
-	backends := generateBackendsFromUrls(ctx, urls)
+	backends, err := generateBackendsFromUrls(ctx, urls)
+	if err != nil {
+		log.Fatalf("error while starting server: %s", err)
+	}
 	balancer.InitializePool(backends)
 
 	server := http.Server{
-		Addr:    fmt.Sprintf(":%d", 8080),
-		Handler: http.HandlerFunc(balancer.LoadBalance),
+		Addr:              fmt.Sprintf(":%d", 8080),
+		Handler:           http.HandlerFunc(balancer.LoadBalance),
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 
 	// NOTE: ListenAndServe returns http.ErrServerClosed on a clean shutdown, so
@@ -44,6 +53,15 @@ func main() {
 	// P2-12).
 	if err := server.ListenAndServe(); err != nil {
 		log.Fatal(err)
+	}
+
+	select {
+	case <-ctx.Done():
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := server.Shutdown(shutdownCtx); err != nil {
+			log.Printf("graceful shutdown failed: %v", err)
+		}
 	}
 }
 
@@ -54,16 +72,20 @@ func main() {
 // NOTE: the slice is preallocated with len(urls) entries and then appended to,
 // so the result contains len(urls) leading nil entries followed by the real
 // backends. See IMPROVEMENTS.md (P0-2).
-func generateBackendsFromUrls(ctx context.Context, urls []string) []*balancer.Backend {
+func generateBackendsFromUrls(ctx context.Context, urls []string) ([]*balancer.Backend, error) {
+	if len(urls) == 0 {
+		return nil, errors.New("please add at least one url")
+	}
+
 	backends := make([]*balancer.Backend, len(urls))
 	for _, url := range urls {
 		b, err := balancer.NewBackend(ctx, url)
 		if err != nil {
-			log.Fatalf("Failure while setting up backend: %s", err)
+			return nil, err
 		}
 
 		backends = append(backends, b)
 	}
 
-	return backends
+	return backends, nil
 }

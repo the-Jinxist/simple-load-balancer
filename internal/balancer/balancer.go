@@ -1,7 +1,6 @@
 package balancer
 
 import (
-	"log"
 	"net/http"
 )
 
@@ -27,7 +26,8 @@ const (
 func LoadBalance(w http.ResponseWriter, r *http.Request) {
 	pool := GetServerPool()
 	if pool == nil {
-		log.Fatal("Sever pool is not initialized yet")
+		http.Error(w, "Service not available", http.StatusServiceUnavailable)
+		return
 	}
 
 	peer := pool.NextPeer()

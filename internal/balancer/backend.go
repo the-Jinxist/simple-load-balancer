@@ -45,10 +45,22 @@ func NewBackend(ctx context.Context, backendURL string) (*Backend, error) {
 	}
 
 	backend := &Backend{
-		Url: url,
+		Url:   url,
+		Alive: true,
 	}
 
 	proxy := httputil.NewSingleHostReverseProxy(url)
+
+	proxy.Transport = &http.Transport{
+		Proxy:                 http.ProxyFromEnvironment,
+		DialContext:           (&net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+		MaxIdleConns:          100,
+		MaxIdleConnsPerHost:   10,
+		IdleConnTimeout:       90 * time.Second,
+		ResponseHeaderTimeout: 10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+	}
+
 	// ErrorHandler runs when the upstream request fails. It retries the same
 	// backend up to three times with a short delay, then marks the backend as
 	// dead and asks the pool to choose another peer.
@@ -61,13 +73,23 @@ func NewBackend(ctx context.Context, backendURL string) (*Backend, error) {
 		if retries < 3 {
 			<-time.After(10 * time.Millisecond)
 			ctx := context.WithValue(r.Context(), RetryKey, retries+1)
+
+			if r.GetBody != nil {
+				body, err := r.GetBody()
+				if err != nil {
+					http.Error(w, "Sorry an error occurred", http.StatusInternalServerError)
+					return
+				}
+				r = r.WithContext(ctx)
+				r.Body = body
+			}
+
 			proxy.ServeHTTP(w, r.WithContext(ctx))
 
 			return
 		}
 
 		backend.SetAlive(false)
-
 		LoadBalance(w, r)
 	}
 
