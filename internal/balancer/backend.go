@@ -93,7 +93,6 @@ func NewBackend(ctx context.Context, backendURL string) (*Backend, error) {
 		}
 
 		backend.SetAlive(false)
-		LoadBalance(w, r)
 	}
 
 	backend.ReverseProxy = proxy

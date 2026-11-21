@@ -36,11 +36,13 @@ func main() {
 	if err != nil {
 		log.Fatalf("error while starting server: %s", err)
 	}
-	balancer.InitializePool(backends)
+
+	pool := balancer.InitializePool(backends)
+	balancer := balancer.NewBalancer(pool)
 
 	server := http.Server{
 		Addr:              fmt.Sprintf(":%d", 8080),
-		Handler:           http.HandlerFunc(balancer.LoadBalance),
+		Handler:           balancer,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       30 * time.Second,
 		WriteTimeout:      30 * time.Second,

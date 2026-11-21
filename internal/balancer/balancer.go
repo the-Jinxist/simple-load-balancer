@@ -17,14 +17,25 @@ const (
 	AttemptKey ContextValue = "ATTEMPT"
 )
 
+type Balancer struct {
+	pool *ServerPool
+}
+
+func NewBalancer(pool *ServerPool) *Balancer {
+	return &Balancer{
+		pool: pool,
+	}
+}
+
 // LoadBalance selects the next alive backend from the global pool and forwards
 // the request to it. If no backend is available it responds with HTTP 503.
 //
 // Known issues: the handler writes a 503 even after a successful proxy because
 // it does not return after ServeHTTP, and it calls log.Fatal when the pool is
 // uninitialized. See IMPROVEMENTS.md (P1-4, P1-5).
-func LoadBalance(w http.ResponseWriter, r *http.Request) {
-	pool := GetServerPool()
+
+func (b *Balancer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	pool := b.pool
 	if pool == nil {
 		http.Error(w, "Service not available", http.StatusServiceUnavailable)
 		return

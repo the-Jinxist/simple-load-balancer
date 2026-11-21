@@ -2,11 +2,6 @@ package balancer
 
 import "sync/atomic"
 
-// serverPool is the process-wide pool used by LoadBalance. It is initialized
-// once by InitializePool. See IMPROVEMENTS.md (P2-15) for why a package-level
-// global is not ideal.
-var serverPool *ServerPool
-
 // ServerPool holds the set of backends and a rotating cursor used to implement
 // round-robin selection.
 type ServerPool struct {
@@ -19,16 +14,10 @@ type ServerPool struct {
 
 // InitializePool replaces the global pool with servers. It must be called
 // before LoadBalance handles any requests.
-func InitializePool(servers []*Backend) {
-	serverPool = &ServerPool{
+func InitializePool(servers []*Backend) *ServerPool {
+	return &ServerPool{
 		servers: servers,
 	}
-}
-
-// GetServerPool returns the global pool, or nil if InitializePool has not been
-// called yet.
-func GetServerPool() *ServerPool {
-	return serverPool
 }
 
 // NextIndex advances the cursor and returns the next index into servers.
