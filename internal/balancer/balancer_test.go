@@ -36,15 +36,15 @@ func TestGetAttemptsFromContext(t *testing.T) {
 	}
 }
 
-// TestLoadBalanceNoAliveBackends verifies the only error path that can be
-// exercised in-process: with no healthy peers the handler responds 503.
-func TestLoadBalanceNoAliveBackends(t *testing.T) {
-	InitializePool([]*Backend{testBackend(false)})
+// TestBalancerNoAliveBackends verifies that the handler responds 503 when the
+// pool has no healthy peers.
+func TestBalancerNoAliveBackends(t *testing.T) {
+	handler := NewBalancer(InitializePool([]*Backend{testBackend(false)}))
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 
-	LoadBalance(rec, req)
+	handler.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusServiceUnavailable)
@@ -54,17 +54,14 @@ func TestLoadBalanceNoAliveBackends(t *testing.T) {
 	}
 }
 
-// TestLoadBalanceNilPool verifies the 503 response added in 2adc653 for the
-// uninitialized-pool branch.
-func TestLoadBalanceNilPool(t *testing.T) {
-	previous := serverPool
-	serverPool = nil
-	t.Cleanup(func() { serverPool = previous })
+// TestBalancerNilPool verifies the 503 response when no pool was supplied.
+func TestBalancerNilPool(t *testing.T) {
+	handler := NewBalancer(nil)
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 
-	LoadBalance(rec, req)
+	handler.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusServiceUnavailable)
@@ -74,10 +71,9 @@ func TestLoadBalanceNilPool(t *testing.T) {
 	}
 }
 
-// TestLoadBalanceSuccess verifies that a successful proxy response is returned
-// as-is. LoadBalance now returns after ServeHTTP, so the 503 body is no longer
-// appended to successful responses.
-func TestLoadBalanceSuccess(t *testing.T) {
+// TestBalancerSuccess verifies that a successful proxy response is returned
+// as-is, without appending the 503 body.
+func TestBalancerSuccess(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("upstream-ok"))
@@ -94,12 +90,12 @@ func TestLoadBalanceSuccess(t *testing.T) {
 		Alive:        true,
 		ReverseProxy: httputil.NewSingleHostReverseProxy(target),
 	}
-	InitializePool([]*Backend{backend})
+	handler := NewBalancer(InitializePool([]*Backend{backend}))
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 
-	LoadBalance(rec, req)
+	handler.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)

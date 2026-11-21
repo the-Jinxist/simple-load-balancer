@@ -2,6 +2,9 @@ package balancer
 
 import (
 	"context"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"sync"
 	"testing"
@@ -50,24 +53,73 @@ func TestBackendAliveFlagConcurrent(t *testing.T) {
 	wg.Wait()
 }
 
-// TestBackendPerformHealthCheckMarksDeadWithoutRequest documents the current
-// health-check behavior. The error check is inverted: a successfully built
-// request immediately marks the backend dead and returns nil, so no request is
-// ever sent. Replace this with real success/failure tests when P2-14 is fixed.
-func TestBackendPerformHealthCheckMarksDeadWithoutRequest(t *testing.T) {
-	hosts := []string{"example.com", "127.0.0.1:1"}
+// TestBackendPerformHealthCheckSuccess verifies that a 2xx health response
+// marks the backend alive.
+func TestBackendPerformHealthCheckSuccess(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
 
-	for _, host := range hosts {
-		t.Run(host, func(t *testing.T) {
-			b := &Backend{Url: &url.URL{Host: host}}
+	target, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatalf("url.Parse(%q): %s", upstream.URL, err)
+	}
 
-			if err := b.performHealthCheck(); err != nil {
-				t.Fatalf("performHealthCheck() = %v, want nil (current behavior)", err)
-			}
-			if b.IsAlive() {
-				t.Fatal("IsAlive() = true, want false (current behavior)")
-			}
-		})
+	b := &Backend{Url: target, client: http.DefaultClient}
+	if err := b.performHealthCheck(); err != nil {
+		t.Fatalf("performHealthCheck() = %v, want nil", err)
+	}
+	if !b.IsAlive() {
+		t.Fatal("IsAlive() = false after a 2xx health response")
+	}
+}
+
+// TestBackendPerformHealthCheckFailure verifies that a connection failure marks
+// the backend dead and returns the error.
+func TestBackendPerformHealthCheckFailure(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen: %s", err)
+	}
+	addr := ln.Addr().String()
+	if err := ln.Close(); err != nil {
+		t.Fatalf("listener.Close: %s", err)
+	}
+
+	target, err := url.Parse("http://" + addr)
+	if err != nil {
+		t.Fatalf("url.Parse(%q): %s", target, err)
+	}
+
+	b := &Backend{Url: target, client: http.DefaultClient}
+	if err := b.performHealthCheck(); err == nil {
+		t.Fatal("performHealthCheck() = nil, want a connection error")
+	}
+	if b.IsAlive() {
+		t.Fatal("IsAlive() = true after a connection failure")
+	}
+}
+
+// TestBackendPerformHealthCheckNon2xx verifies that a non-2xx response marks the
+// backend dead.
+func TestBackendPerformHealthCheckNon2xx(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "unhealthy", http.StatusInternalServerError)
+	}))
+	defer upstream.Close()
+
+	target, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatalf("url.Parse(%q): %s", upstream.URL, err)
+	}
+
+	b := &Backend{Url: target, client: http.DefaultClient}
+	if err := b.performHealthCheck(); err == nil {
+		t.Fatal("performHealthCheck() = nil, want an error for a 500 response")
+	}
+	if b.IsAlive() {
+		t.Fatal("IsAlive() = true after a 500 response")
 	}
 }
 

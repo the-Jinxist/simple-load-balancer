@@ -5,25 +5,10 @@ import (
 	"testing"
 )
 
-// testBackend builds a Backend without starting the health-check goroutine,
-// which is currently broken (see P2-14 in IMPROVEMENTS.md).
+// testBackend builds a Backend without starting the health-check goroutine so
+// tests can control Alive directly.
 func testBackend(alive bool) *Backend {
 	return &Backend{Alive: alive}
-}
-
-// TestServerPoolNextIndexSequence documents the current cursor arithmetic:
-// the counter is pre-incremented and decremented again, so the first index is 0.
-func TestServerPoolNextIndexSequence(t *testing.T) {
-	pool := &ServerPool{
-		servers: []*Backend{testBackend(true), testBackend(true), testBackend(true)},
-	}
-
-	want := []int{0, 1, 2, 0, 1, 2}
-	for i, expected := range want {
-		if got := pool.NextIndex(); got != expected {
-			t.Fatalf("call %d: NextIndex() = %d, want %d", i+1, got, expected)
-		}
-	}
 }
 
 // TestServerPoolNextPeerRoundRobin verifies that consecutive calls rotate
@@ -50,9 +35,8 @@ func TestServerPoolNextPeerRoundRobin(t *testing.T) {
 }
 
 // TestServerPoolNextPeerSkipsDead verifies that the scan moves past dead
-// backends and wraps around to the start of the slice. Each alive backend is
-// currently selected twice in a row because a fallback scan stores the selected
-// index while NextIndex computes the previous cursor value.
+// backends and wraps around to the start of the slice. The cursor advances past
+// the selected backend, so each alive backend is selected once per cycle.
 func TestServerPoolNextPeerSkipsDead(t *testing.T) {
 	backends := []*Backend{
 		testBackend(false),
@@ -63,9 +47,8 @@ func TestServerPoolNextPeerSkipsDead(t *testing.T) {
 	pool := &ServerPool{servers: backends}
 
 	want := []*Backend{
-		backends[1], backends[1],
-		backends[3], backends[3],
-		backends[1], backends[1],
+		backends[1], backends[3],
+		backends[1], backends[3],
 	}
 
 	for i, expected := range want {
@@ -98,27 +81,32 @@ func TestServerPoolNextPeerEmptyPool(t *testing.T) {
 	}
 }
 
-// TestServerPoolNextPeerNormalizesIndex verifies that a fallback scan stores the
-// normalized backend index in the cursor rather than the raw loop index.
-func TestServerPoolNextPeerNormalizesIndex(t *testing.T) {
+// TestServerPoolNextPeerAdvancesPastSelected verifies that a fallback scan
+// advances the cursor past the backend it selected, not merely past the index
+// where the scan started.
+func TestServerPoolNextPeerAdvancesPastSelected(t *testing.T) {
 	backends := []*Backend{
-		testBackend(true),
-		testBackend(false),
-		testBackend(false),
-		testBackend(false),
+		testBackend(true),  // 0
+		testBackend(false), // 1
+		testBackend(true),  // 2
+		testBackend(false), // 3
 	}
 	pool := &ServerPool{servers: backends}
 
-	// Start the cursor at 1 so the scan must wrap past the end of the slice
-	// (i == 4, idx == 0) to find the only alive backend.
-	pool.current.Store(1)
-
 	if got := pool.NextPeer(); got != backends[0] {
-		t.Fatalf("NextPeer() = %p, want backends[0] (%p)", got, backends[0])
+		t.Fatalf("first NextPeer() = %p, want backends[0] (%p)", got, backends[0])
+	}
+	if got := pool.current.Load(); got != 1 {
+		t.Fatalf("after first selection current = %d, want 1", got)
 	}
 
-	if got := pool.current.Load(); got != 0 {
-		t.Fatalf("current = %d, want normalized index 0", got)
+	// The scan starts at 1, skips it, selects index 2, and should leave the
+	// cursor at index 3.
+	if got := pool.NextPeer(); got != backends[2] {
+		t.Fatalf("second NextPeer() = %p, want backends[2] (%p)", got, backends[2])
+	}
+	if got := pool.current.Load(); got != 3 {
+		t.Fatalf("after second selection current = %d, want 3", got)
 	}
 }
 
