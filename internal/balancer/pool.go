@@ -20,19 +20,6 @@ func InitializePool(servers []*Backend) *ServerPool {
 	}
 }
 
-// NextIndex advances the cursor and returns the next index into servers.
-//
-// The cursor is incremented before the modulo, so the first call returns 1
-// rather than 0. NextIndex panics when the pool is empty. See IMPROVEMENTS.md
-// (P1-6, P1-7).
-func (s *ServerPool) NextIndex() int {
-	if len(s.servers) == 0 {
-		return 0
-	}
-
-	return int((s.current.Add(1) - 1) % uint64(len(s.servers)))
-}
-
 // NextPeer returns the next alive backend in round-robin order, starting at
 // NextIndex() and scanning at most one full cycle of the pool. It returns nil
 // when every backend is dead.
@@ -41,26 +28,36 @@ func (s *ServerPool) NextIndex() int {
 // back into the cursor instead of the normalized backend index. See
 // IMPROVEMENTS.md (P1-6).
 func (s *ServerPool) NextPeer() *Backend {
-	// servers = [1, 2, 3, 4, 5]
-	// we're on server 3
-	//
-	// If the next pick is dead, walk forward through the slice (wrapping with
-	// modulo) until an alive backend is found or the full cycle is exhausted.
-	nextIndex := s.NextIndex()
-	// nextIndex = 4
-
-	l := len(s.servers) + nextIndex
-	// full cycle = 5 + 4 = 9
-
-	for i := nextIndex; i < l; i++ {
-		idx := i % len(s.servers)
-		if s.servers[idx].IsAlive() {
-			if i != nextIndex {
-				s.current.Store(uint64(idx)) // mark the current one (raw, unnormalized index)
-			}
-			return s.servers[idx]
-		}
+	n := len(s.servers)
+	if n == 0 {
+		return nil
 	}
 
-	return nil
+	for {
+		current := int(s.current.Load())
+		selected := -1
+
+		path := (current + n) - 1
+		for i := current; i <= path; i++ {
+			idx := i % n
+			if s.servers[idx].IsAlive() {
+				selected = idx
+				break
+			}
+		}
+
+		if selected == -1 {
+			return nil
+		}
+
+		next := uint64((selected + 1) % n)
+		if s.current.CompareAndSwap(uint64(current), next) {
+			return s.servers[selected]
+		}
+
+	}
+}
+
+func (s *ServerPool) SelectedBacked() *Backend {
+	return s.servers[s.current.Load()]
 }

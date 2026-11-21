@@ -10,6 +10,8 @@ import (
 	"net/url"
 	"sync"
 	"time"
+
+	"simple-load-balancer/pkg"
 )
 
 // Backend represents a single upstream server together with the reverse proxy
@@ -31,6 +33,8 @@ type Backend struct {
 	ctx context.Context
 
 	client *http.Client
+
+	healthCheckInterval time.Duration
 }
 
 // NewBackend parses backendURL, builds a reverse proxy for it, and starts a
@@ -47,9 +51,10 @@ func NewBackend(ctx context.Context, backendURL string) (*Backend, error) {
 	}
 
 	backend := &Backend{
-		Url:    url,
-		ctx:    ctx,
-		client: http.DefaultClient,
+		Url:                 url,
+		ctx:                 ctx,
+		client:              http.DefaultClient,
+		healthCheckInterval: 2 * time.Second,
 	}
 
 	proxy := httputil.NewSingleHostReverseProxy(url)
@@ -74,7 +79,8 @@ func NewBackend(ctx context.Context, backendURL string) (*Backend, error) {
 		log.Printf("[%s] %s\n", url.Host, err.Error())
 		retries := GetRetriesFromContext(r)
 		if retries < 3 {
-			<-time.After(10 * time.Millisecond)
+			base := time.Duration(10+10*retries) * time.Millisecond
+			<-time.After(base)
 			ctx := context.WithValue(r.Context(), RetryKey, retries+1)
 
 			if r.GetBody != nil {
@@ -88,10 +94,10 @@ func NewBackend(ctx context.Context, backendURL string) (*Backend, error) {
 			}
 
 			proxy.ServeHTTP(w, r.WithContext(ctx))
-
 			return
 		}
 
+		http.Error(w, "Bad Gateway", http.StatusBadGateway)
 		backend.SetAlive(false)
 	}
 
@@ -127,7 +133,7 @@ func (b *Backend) startPeriodicalHealthChecks() {
 		log.Printf("initial health check failed for %s: %v", b.Url.Host, err)
 	}
 
-	ticker := time.NewTicker(1 * time.Minute)
+	ticker := time.NewTicker(pkg.Jitter(b.healthCheckInterval, 0.2))
 	defer ticker.Stop()
 
 	for {
@@ -137,6 +143,8 @@ func (b *Backend) startPeriodicalHealthChecks() {
 			if err != nil {
 				log.Printf("error while performing health check: %s", err)
 			}
+
+			ticker.Reset(pkg.Jitter(b.healthCheckInterval, 0.1))
 		case <-b.ctx.Done():
 			fmt.Println("Stopped ticker loop.")
 			return
@@ -154,7 +162,7 @@ func (b *Backend) performHealthCheck() error {
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(checkCtx, http.MethodGet, b.Url.String(), nil)
-	if err == nil {
+	if err != nil {
 		b.SetAlive(false)
 		return err
 	}
