@@ -30,8 +30,8 @@ func main() {
 		"", "", "", "",
 	}
 
-	// NOTE: the signal context is only passed to the backends. The HTTP server
-	// itself does not shut down gracefully yet. See IMPROVEMENTS.md (P2-11).
+	// The signal context is passed to the backends and used to trigger a
+	// graceful HTTP server shutdown.
 	backends, err := generateBackendsFromUrls(ctx, urls)
 	if err != nil {
 		log.Fatalf("error while starting server: %s", err)
@@ -49,10 +49,8 @@ func main() {
 		IdleTimeout:       120 * time.Second,
 	}
 
-	// NOTE: ListenAndServe returns http.ErrServerClosed on a clean shutdown, so
-	// treating every error as fatal also exits non-zero in that case. The server
-	// also has no read/write/idle timeouts yet. See IMPROVEMENTS.md (P2-11,
-	// P2-12).
+	// Run the server in a goroutine so the main goroutine can handle signals.
+	// http.ErrServerClosed is treated as a clean shutdown, not a fatal error.
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- server.ListenAndServe()

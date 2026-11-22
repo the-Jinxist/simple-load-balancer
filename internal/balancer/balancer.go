@@ -17,23 +17,22 @@ const (
 	AttemptKey ContextValue = "ATTEMPT"
 )
 
+// Balancer is an HTTP handler that selects a backend from a ServerPool and
+// proxies the request to it.
 type Balancer struct {
 	pool *ServerPool
 }
 
+// NewBalancer returns a Balancer backed by pool. A nil pool causes every
+// request to receive a 503 response.
 func NewBalancer(pool *ServerPool) *Balancer {
 	return &Balancer{
 		pool: pool,
 	}
 }
 
-// LoadBalance selects the next alive backend from the global pool and forwards
-// the request to it. If no backend is available it responds with HTTP 503.
-//
-// Known issues: the handler writes a 503 even after a successful proxy because
-// it does not return after ServeHTTP, and it calls log.Fatal when the pool is
-// uninitialized. See IMPROVEMENTS.md (P1-4, P1-5).
-
+// ServeHTTP selects the next alive backend and forwards the request to it. If
+// the pool is nil or no backend is alive, it responds with HTTP 503.
 func (b *Balancer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	pool := b.pool
 	if pool == nil {
@@ -47,8 +46,7 @@ func (b *Balancer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// NOTE: this line also runs after a successful ServeHTTP above.
-	// See IMPROVEMENTS.md (P1-4).
+	// No peer was selected.
 	http.Error(w, "Service not available", http.StatusServiceUnavailable)
 }
 

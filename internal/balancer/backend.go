@@ -28,22 +28,20 @@ type Backend struct {
 	// ReverseProxy forwards requests to the upstream server. It is safe for
 	// concurrent use.
 	ReverseProxy *httputil.ReverseProxy
-	// ctx would stop the health-check loop when cancelled, but it is currently
-	// never assigned by NewBackend. See IMPROVEMENTS.md (P0-1).
+	// ctx stops the health-check loop when cancelled.
 	ctx context.Context
-
+	// client performs health-check requests.
 	client *http.Client
-
+	// healthCheckInterval is the base interval between health checks. Jitter is
+	// applied on every tick.
 	healthCheckInterval time.Duration
 }
 
 // NewBackend parses backendURL, builds a reverse proxy for it, and starts a
 // background health-check loop.
 //
-// The health-check goroutine is meant to stop when ctx is cancelled. A newly
-// created backend starts marked as not alive; the first check runs after one
-// full ticker interval. See IMPROVEMENTS.md (P0-1, P1-8) for known issues with
-// context handling and the startup delay.
+// A new backend starts marked as not alive and performs an immediate health
+// check; subsequent checks run at a jittered interval until ctx is cancelled.
 func NewBackend(ctx context.Context, backendURL string) (*Backend, error) {
 	url, err := url.Parse(backendURL)
 	if err != nil {
@@ -70,11 +68,11 @@ func NewBackend(ctx context.Context, backendURL string) (*Backend, error) {
 	}
 
 	// ErrorHandler runs when the upstream request fails. It retries the same
-	// backend up to three times with a short delay, then marks the backend as
-	// dead and asks the pool to choose another peer.
+	// backend up to three times with linear backoff, then writes a 502 response
+	// and marks the backend dead.
 	//
-	// Known issues: retries reuse an already-consumed request body and always
-	// target the same backend. See IMPROVEMENTS.md (P1-9, P1-10).
+	// Known limitations: retries may reuse an already-consumed request body and
+	// always target the same backend. See IMPROVEMENTS.md (P1-9, P1-10).
 	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
 		log.Printf("[%s] %s\n", url.Host, err.Error())
 		retries := GetRetriesFromContext(r)
@@ -124,10 +122,8 @@ func (b *Backend) IsAlive() (alive bool) {
 	return
 }
 
-// startPeriodicalHealthChecks runs a TCP health check every minute until the
-// backend's context is cancelled. Because the first check only happens on the
-// first tick, a newly created backend stays marked as not alive for the first
-// minute. See IMPROVEMENTS.md (P1-8).
+// startPeriodicalHealthChecks performs an immediate health check, then repeats
+// at a jittered interval until the backend context is cancelled.
 func (b *Backend) startPeriodicalHealthChecks() {
 	if err := b.performHealthCheck(); err != nil {
 		log.Printf("initial health check failed for %s: %v", b.Url.Host, err)
@@ -152,10 +148,9 @@ func (b *Backend) startPeriodicalHealthChecks() {
 	}
 }
 
-// performHealthCheck attempts a TCP connection to the backend's host and records
-// the result in Alive. It does not send an HTTP request, so a process that
-// accepts connections but returns errors is still considered healthy. See
-// IMPROVEMENTS.md (P2-14).
+// performHealthCheck sends an HTTP GET to the backend and records the result in
+// Alive. Any 2xx response marks the backend alive; request errors, timeouts, and
+// non-2xx responses mark it dead.
 func (b *Backend) performHealthCheck() error {
 	timeout := 2 * time.Second
 	checkCtx, cancel := context.WithTimeout(context.Background(), timeout)

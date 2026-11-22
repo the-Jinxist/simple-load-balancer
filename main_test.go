@@ -31,9 +31,9 @@ func TestGenerateBackendsFromUrlsInvalidURL(t *testing.T) {
 
 // TestGenerateBackendsFromUrlsValid is a regression test for the preallocation
 // bug: the function previously assigned into a zero-length slice instead of
-// appending. Port 1 on loopback is used so that a future working health check
-// fails fast without external traffic; the cancellation context stops the
-// health-check goroutines when the test ends.
+// appending. Port 1 on loopback is used so health checks fail fast without
+// external traffic; the cancellation context stops the health-check goroutines
+// when the test ends.
 func TestGenerateBackendsFromUrlsValid(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
